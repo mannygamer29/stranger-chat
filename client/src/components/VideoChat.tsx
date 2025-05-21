@@ -34,6 +34,10 @@ const VideoChat: React.FC<VideoChatProps> = ({
   const isInitiatorRef = useRef(false);
   const pendingCandidatesRef = useRef<RTCIceCandidate[]>([]);
   const hasStartedNegotiationRef = useRef(false);
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
+  const negotiationInProgressRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 3;
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -50,7 +54,48 @@ const VideoChat: React.FC<VideoChatProps> = ({
   }, []);
 
   useEffect(() => {
+    const handleConnect = () => {
+      console.log('[Socket] Connected to signaling server');
+      setIsSocketConnected(true);
+      reconnectAttemptsRef.current = 0;
+    };
+
+    const handleDisconnect = () => {
+      console.log('[Socket] Disconnected from signaling server');
+      setIsSocketConnected(false);
+      setError('Lost connection to server. Attempting to reconnect...');
+    };
+
+    const handleConnectError = (error: Error) => {
+      console.error('[Socket] Connection error:', error);
+      setError('Failed to connect to server. Please check your internet connection.');
+    };
+
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleConnectError);
+
+    // Set initial connection state
+    setIsSocketConnected(socket.connected);
+
+    return () => {
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleConnectError);
+    };
+  }, [socket]);
+
+  useEffect(() => {
     const initializeMedia = async () => {
+      if (!isSocketConnected) {
+        console.log('[WebRTC] Waiting for socket connection...');
+        return;
+      }
+
+      if (isPartnerDisconnected) {
+        return;
+      }
+
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -119,30 +164,30 @@ const VideoChat: React.FC<VideoChatProps> = ({
             case 'connected':
               console.log('[WebRTC] Connection established successfully');
               setError('');
+              reconnectAttemptsRef.current = 0;
               break;
             case 'connecting':
               console.log('[WebRTC] Attempting to establish connection...');
               setError('Connecting to partner...');
               break;
             case 'disconnected':
-              console.log('[WebRTC] Connection disconnected');
-              setIsRemoteStreamReady(false);
-              if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = null;
-              }
-              setError('Connection lost. Attempting to reconnect...');
-              // Try to restart ICE
-              if (peerConnectionRef.current) {
-                peerConnectionRef.current.restartIce();
-              }
-              break;
             case 'failed':
-              console.log('[WebRTC] Connection failed');
-              setIsRemoteStreamReady(false);
-              if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = null;
+              console.log('[WebRTC] Connection', peerConnection.connectionState);
+              if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttemptsRef.current++;
+                console.log(`[WebRTC] Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+                setError(`Connection lost. Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+                if (peerConnectionRef.current) {
+                  peerConnectionRef.current.restartIce();
+                }
+              } else {
+                console.log('[WebRTC] Max reconnection attempts reached');
+                setError('Connection failed. Please try refreshing the page.');
+                setIsRemoteStreamReady(false);
+                if (remoteVideoRef.current) {
+                  remoteVideoRef.current.srcObject = null;
+                }
               }
-              setError('Connection failed. Please try refreshing the page.');
               break;
             case 'closed':
               console.log('[WebRTC] Connection closed');
@@ -189,20 +234,30 @@ const VideoChat: React.FC<VideoChatProps> = ({
 
         // Handle negotiation needed event
         peerConnection.onnegotiationneeded = async () => {
-          if (hasStartedNegotiationRef.current) {
-            console.log('[WebRTC] Negotiation needed, but already in progress');
+          if (negotiationInProgressRef.current) {
+            console.log('[WebRTC] Negotiation already in progress, skipping...');
             return;
           }
-          hasStartedNegotiationRef.current = true;
+
+          if (!isSocketConnected) {
+            console.log('[WebRTC] Socket not connected, deferring negotiation...');
+            return;
+          }
+
+          negotiationInProgressRef.current = true;
 
           try {
-            // Determine if we should be the initiator based on socket ID
             const socketId = socket.id;
             if (!socketId) {
-              console.error('[WebRTC] Socket ID not available');
-              setError('Connection error. Please refresh the page.');
+              console.error('[WebRTC] Socket ID not available, retrying in 1s...');
+              setTimeout(() => {
+                negotiationInProgressRef.current = false;
+                const event = new Event('negotiationneeded');
+                peerConnection.dispatchEvent(event);
+              }, 1000);
               return;
             }
+
             const shouldBeInitiator = socketId < partnerId;
             isInitiatorRef.current = shouldBeInitiator;
 
@@ -213,9 +268,7 @@ const VideoChat: React.FC<VideoChatProps> = ({
                 offerToReceiveVideo: true,
                 iceRestart: true
               });
-              console.log('[WebRTC] Setting local description...');
               await peerConnection.setLocalDescription(offer);
-              console.log('[WebRTC] Sending offer to partner:', partnerId);
               socket.emit('offer', {
                 target: partnerId,
                 offer: peerConnection.localDescription
@@ -227,7 +280,7 @@ const VideoChat: React.FC<VideoChatProps> = ({
             console.error('[WebRTC] Error during negotiation:', err);
             setError('Failed to establish video connection. Please try refreshing the page.');
           } finally {
-            hasStartedNegotiationRef.current = false;
+            negotiationInProgressRef.current = false;
           }
         };
 
@@ -311,36 +364,13 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         });
 
-        // Add socket connection status monitoring
-        socket.on('connect', () => {
-          console.log('[Socket] Connected to signaling server');
-        });
-
-        socket.on('disconnect', () => {
-          console.log('[Socket] Disconnected from signaling server');
-          setError('Lost connection to server. Please refresh the page.');
-        });
-
-        socket.on('connect_error', (error) => {
-          console.error('[Socket] Connection error:', error);
-          setError('Failed to connect to server. Please check your internet connection.');
-        });
-
-        // Trigger initial negotiation
-        if (peerConnection.signalingState === 'stable') {
-          const event = new Event('negotiationneeded');
-          peerConnection.dispatchEvent(event);
-        }
-
       } catch (err) {
         console.error('Error accessing media devices:', err);
         setError('Could not access camera or microphone. Please check your permissions and try again.');
       }
     };
 
-    if (!isPartnerDisconnected) {
-      initializeMedia();
-    }
+    initializeMedia();
 
     return () => {
       // Enhanced cleanup
@@ -359,8 +389,10 @@ const VideoChat: React.FC<VideoChatProps> = ({
       setIsLocalStreamReady(false);
       setIsRemoteStreamReady(false);
       hasStartedNegotiationRef.current = false;
+      negotiationInProgressRef.current = false;
+      reconnectAttemptsRef.current = 0;
     };
-  }, [partnerId, socket, isPartnerDisconnected]);
+  }, [partnerId, socket, isPartnerDisconnected, isSocketConnected]);
 
   const toggleCamera = () => {
     if (localVideoRef.current?.srcObject) {
