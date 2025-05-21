@@ -14,7 +14,8 @@
     "noImplicitAny": false,
     "noEmitOnError": false,
     "allowSyntheticDefaultImports": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "typeRoots": ["./node_modules/@types", "./src/types.d.ts"]
   },
   "include": ["src/**/*"],
   "exclude": [

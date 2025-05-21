@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc --noEmit false",
+    "build": "tsc --skipLibCheck --noEmitOnError false",
     "prepare": "npm run build"
   },
   "keywords": [],
@@ -22,8 +22,6 @@
     "@types/cors": "^2.8.13",
     "@types/express": "^4.17.17",
     "@types/node": "^18.15.11",
-    "@types/strip-bom": "^3.0.0",
-    "@types/strip-json-comments": "^0.0.30",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.0.4"
   },
