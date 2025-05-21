@@ -31,6 +31,8 @@ const VideoChat: React.FC<VideoChatProps> = ({
   const [isPortrait, setIsPortrait] = useState(window.innerHeight > window.innerWidth);
   const [isLocalStreamReady, setIsLocalStreamReady] = useState(false);
   const [isRemoteStreamReady, setIsRemoteStreamReady] = useState(false);
+  const isInitiatorRef = useRef(false);
+  const pendingCandidatesRef = useRef<RTCIceCandidate[]>([]);
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -75,7 +77,6 @@ const VideoChat: React.FC<VideoChatProps> = ({
             { urls: 'stun:stun2.l.google.com:19302' },
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
-            // Add TURN servers for better connectivity
             {
               urls: 'turn:numb.viagenie.ca',
               credential: 'muazkh',
@@ -185,34 +186,31 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         };
 
-        // Create and send offer with enhanced error handling
-        try {
-          console.log('[WebRTC] Creating offer...');
-          const offer = await peerConnection.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: true,
-            iceRestart: true
-          });
-          console.log('[WebRTC] Setting local description...');
-          await peerConnection.setLocalDescription(offer);
-          console.log('[WebRTC] Sending offer to partner:', partnerId);
-          socket.emit('offer', {
-            target: partnerId,
-            offer: peerConnection.localDescription
-          });
-        } catch (err) {
-          console.error('[WebRTC] Error creating/sending offer:', err);
-          setError('Failed to establish video connection. Please try refreshing the page.');
-        }
-
         // Handle incoming answer with enhanced error handling
         socket.on('answer', async (data: { answer: RTCSessionDescriptionInit, from: string }) => {
           console.log('[WebRTC] Received answer from:', data.from);
-          if (data.from === partnerId && peerConnectionRef.current) {
+          if (data.from === partnerId && peerConnectionRef.current && isInitiatorRef.current) {
             try {
+              if (peerConnectionRef.current.signalingState !== 'have-local-offer') {
+                console.log('[WebRTC] Ignoring answer - wrong signaling state:', peerConnectionRef.current.signalingState);
+                return;
+              }
               console.log('[WebRTC] Setting remote description from answer...');
               await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
               console.log('[WebRTC] Remote description set successfully');
+              
+              // Add any pending candidates
+              while (pendingCandidatesRef.current.length > 0) {
+                const candidate = pendingCandidatesRef.current.shift();
+                if (candidate) {
+                  try {
+                    await peerConnectionRef.current.addIceCandidate(candidate);
+                    console.log('[WebRTC] Added pending ICE candidate');
+                  } catch (e) {
+                    console.error('[WebRTC] Error adding pending ICE candidate:', e);
+                  }
+                }
+              }
             } catch (err) {
               console.error('[WebRTC] Error setting remote description from answer:', err);
               setError('Failed to establish video connection. Please try refreshing the page.');
@@ -225,12 +223,17 @@ const VideoChat: React.FC<VideoChatProps> = ({
           console.log('[WebRTC] Received ICE candidate from:', data.from);
           if (data.from === partnerId && peerConnectionRef.current) {
             try {
-              console.log('[WebRTC] Adding ICE candidate...');
-              await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-              console.log('[WebRTC] ICE candidate added successfully');
+              const candidate = new RTCIceCandidate(data.candidate);
+              if (peerConnectionRef.current.remoteDescription) {
+                console.log('[WebRTC] Adding ICE candidate...');
+                await peerConnectionRef.current.addIceCandidate(candidate);
+                console.log('[WebRTC] ICE candidate added successfully');
+              } else {
+                console.log('[WebRTC] Storing ICE candidate for later');
+                pendingCandidatesRef.current.push(candidate);
+              }
             } catch (e) {
               console.error('[WebRTC] Error adding ICE candidate:', e);
-              // Don't set error here as this is not critical
             }
           }
         });
@@ -240,6 +243,11 @@ const VideoChat: React.FC<VideoChatProps> = ({
           console.log('[WebRTC] Received offer from:', data.from);
           if (data.from === partnerId && peerConnectionRef.current) {
             try {
+              if (peerConnectionRef.current.signalingState !== 'stable') {
+                console.log('[WebRTC] Ignoring offer - wrong signaling state:', peerConnectionRef.current.signalingState);
+                return;
+              }
+              isInitiatorRef.current = false;
               console.log('[WebRTC] Setting remote description from offer...');
               await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
               console.log('[WebRTC] Creating answer...');
@@ -257,6 +265,27 @@ const VideoChat: React.FC<VideoChatProps> = ({
             }
           }
         });
+
+        // Create and send offer with enhanced error handling
+        try {
+          isInitiatorRef.current = true;
+          console.log('[WebRTC] Creating offer...');
+          const offer = await peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+            iceRestart: true
+          });
+          console.log('[WebRTC] Setting local description...');
+          await peerConnection.setLocalDescription(offer);
+          console.log('[WebRTC] Sending offer to partner:', partnerId);
+          socket.emit('offer', {
+            target: partnerId,
+            offer: peerConnection.localDescription
+          });
+        } catch (err) {
+          console.error('[WebRTC] Error creating/sending offer:', err);
+          setError('Failed to establish video connection. Please try refreshing the page.');
+        }
 
         // Add socket connection status monitoring
         socket.on('connect', () => {
