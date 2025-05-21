@@ -11,9 +11,7 @@
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "allowJs": true,
-    "noImplicitAny": false,
-    "typeRoots": ["./node_modules/@types"],
-    "types": ["node", "express", "cors"]
+    "noImplicitAny": false
   },
   "include": ["src/**/*"],
   "exclude": [
