@@ -38,6 +38,8 @@ const VideoChat: React.FC<VideoChatProps> = ({
   const negotiationInProgressRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 3;
+  const [selectedIceCandidate, setSelectedIceCandidate] = useState<RTCIceCandidate | null>(null);
+  const iceCandidatesRef = useRef<RTCIceCandidate[]>([]);
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -115,23 +117,47 @@ const VideoChat: React.FC<VideoChatProps> = ({
           setIsLocalStreamReady(true);
         }
 
-        // Initialize WebRTC with more robust configuration
+        // Enhanced WebRTC configuration with multiple TURN servers
         const configuration: RTCConfiguration = {
           iceServers: [
+            // Google STUN servers
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
+            // OpenRelay TURN servers
+            {
+              urls: 'turn:openrelay.metered.ca:80',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            // Additional TURN servers
             {
               urls: 'turn:numb.viagenie.ca',
               credential: 'muazkh',
               username: 'webrtc@live.com'
+            },
+            {
+              urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
+              credential: 'webrtc',
+              username: 'webrtc'
             }
           ],
           iceCandidatePoolSize: 10,
           bundlePolicy: 'max-bundle' as RTCBundlePolicy,
-          rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
+          rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy,
+          iceTransportPolicy: 'all' as RTCIceTransportPolicy
         };
 
         const peerConnection = new RTCPeerConnection(configuration);
@@ -148,12 +174,45 @@ const VideoChat: React.FC<VideoChatProps> = ({
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
             console.log('[WebRTC] New ICE candidate:', event.candidate);
-            socket.emit('ice-candidate', {
-              target: partnerId,
-              candidate: event.candidate
-            });
+            // Store candidate for potential filtering
+            iceCandidatesRef.current.push(event.candidate);
+            
+            // Prioritize TURN candidates
+            if (event.candidate.candidate.includes('relay') || 
+                event.candidate.candidate.includes('turn')) {
+              console.log('[WebRTC] Found TURN candidate, using it');
+              setSelectedIceCandidate(event.candidate);
+              socket.emit('ice-candidate', {
+                target: partnerId,
+                candidate: event.candidate
+              });
+            } else if (!selectedIceCandidate) {
+              // If no TURN candidate yet, use this one
+              setSelectedIceCandidate(event.candidate);
+              socket.emit('ice-candidate', {
+                target: partnerId,
+                candidate: event.candidate
+              });
+            }
           } else {
             console.log('[WebRTC] ICE gathering completed');
+            // If we haven't sent any candidates yet, send the best one
+            if (!selectedIceCandidate && iceCandidatesRef.current.length > 0) {
+              const bestCandidate = iceCandidatesRef.current.reduce((best, current) => {
+                // Prioritize UDP over TCP
+                if (current.protocol === 'udp' && best.protocol !== 'udp') return current;
+                // Prioritize candidates with lower priority (higher priority number)
+                const currentPriority = current.priority ?? 0;
+                const bestPriority = best.priority ?? 0;
+                if (currentPriority > bestPriority) return current;
+                return best;
+              });
+              console.log('[WebRTC] Using best available candidate:', bestCandidate);
+              socket.emit('ice-candidate', {
+                target: partnerId,
+                candidate: bestCandidate
+              });
+            }
           }
         };
 
@@ -165,6 +224,9 @@ const VideoChat: React.FC<VideoChatProps> = ({
               console.log('[WebRTC] Connection established successfully');
               setError('');
               reconnectAttemptsRef.current = 0;
+              // Clear ICE candidates after successful connection
+              iceCandidatesRef.current = [];
+              setSelectedIceCandidate(null);
               break;
             case 'connecting':
               console.log('[WebRTC] Attempting to establish connection...');
@@ -177,7 +239,18 @@ const VideoChat: React.FC<VideoChatProps> = ({
                 reconnectAttemptsRef.current++;
                 console.log(`[WebRTC] Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
                 setError(`Connection lost. Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+                
+                // Clear ICE candidates and selected candidate on reconnect
+                iceCandidatesRef.current = [];
+                setSelectedIceCandidate(null);
+                
                 if (peerConnectionRef.current) {
+                  // Try to force TURN usage on reconnect
+                  const turnConfig = {
+                    ...configuration,
+                    iceTransportPolicy: 'relay' as RTCIceTransportPolicy
+                  };
+                  peerConnectionRef.current.setConfiguration(turnConfig);
                   peerConnectionRef.current.restartIce();
                 }
               } else {
@@ -391,6 +464,8 @@ const VideoChat: React.FC<VideoChatProps> = ({
       hasStartedNegotiationRef.current = false;
       negotiationInProgressRef.current = false;
       reconnectAttemptsRef.current = 0;
+      iceCandidatesRef.current = [];
+      setSelectedIceCandidate(null);
     };
   }, [partnerId, socket, isPartnerDisconnected, isSocketConnected]);
 
