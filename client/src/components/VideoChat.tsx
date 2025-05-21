@@ -68,7 +68,7 @@ const VideoChat: React.FC<VideoChatProps> = ({
         }
 
         // Initialize WebRTC with more robust configuration
-        const configuration = {
+        const configuration: RTCConfiguration = {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -83,8 +83,8 @@ const VideoChat: React.FC<VideoChatProps> = ({
             }
           ],
           iceCandidatePoolSize: 10,
-          bundlePolicy: 'max-bundle',
-          rtcpMuxPolicy: 'require'
+          bundlePolicy: 'max-bundle' as RTCBundlePolicy,
+          rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
         };
 
         const peerConnection = new RTCPeerConnection(configuration);
