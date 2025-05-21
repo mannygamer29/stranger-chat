@@ -1,0 +1,21 @@
+{
+  "name": "stranger-chat",
+  "version": "1.0.0",
+  "description": "A text-based random chat application similar to Omegle",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "start": "concurrently \"npm run start:server\" \"npm run start:client\"",
+    "start:server": "npm run start --workspace=server",
+    "start:client": "npm run start --workspace=client",
+    "install:all": "npm install && npm run install:client && npm run install:server",
+    "install:client": "npm install --workspace=client",
+    "install:server": "npm install --workspace=server"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+} 
