@@ -11,8 +11,15 @@
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "allowJs": true,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "typeRoots": ["./node_modules/@types"],
+    "types": ["node", "express", "cors"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
 } 
