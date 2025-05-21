@@ -50,8 +50,16 @@ const VideoChat: React.FC<VideoChatProps> = ({
     const initializeMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'user'
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
         });
 
         if (localVideoRef.current) {
@@ -59,12 +67,24 @@ const VideoChat: React.FC<VideoChatProps> = ({
           setIsLocalStreamReady(true);
         }
 
-        // Initialize WebRTC
+        // Initialize WebRTC with more robust configuration
         const configuration = {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-          ]
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            // Add TURN servers for better connectivity
+            {
+              urls: 'turn:numb.viagenie.ca',
+              credential: 'muazkh',
+              username: 'webrtc@live.com'
+            }
+          ],
+          iceCandidatePoolSize: 10,
+          bundlePolicy: 'max-bundle',
+          rtcpMuxPolicy: 'require'
         };
 
         const peerConnection = new RTCPeerConnection(configuration);
@@ -77,9 +97,10 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         });
 
-        // Handle ICE candidates
+        // Enhanced ICE candidate handling
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
+            console.log('New ICE candidate:', event.candidate);
             socket.emit('ice-candidate', {
               target: partnerId,
               candidate: event.candidate
@@ -87,68 +108,117 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         };
 
-        // Handle incoming stream
+        // Enhanced connection state handling
+        peerConnection.onconnectionstatechange = () => {
+          console.log('Connection state:', peerConnection.connectionState);
+          switch (peerConnection.connectionState) {
+            case 'connected':
+              console.log('WebRTC connection established');
+              break;
+            case 'disconnected':
+            case 'failed':
+              console.log('WebRTC connection failed or disconnected');
+              setIsRemoteStreamReady(false);
+              if (remoteVideoRef.current) {
+                remoteVideoRef.current.srcObject = null;
+              }
+              setError('Connection lost. Please try reconnecting.');
+              break;
+            case 'closed':
+              console.log('WebRTC connection closed');
+              setIsRemoteStreamReady(false);
+              if (remoteVideoRef.current) {
+                remoteVideoRef.current.srcObject = null;
+              }
+              break;
+          }
+        };
+
+        // Enhanced ICE connection state handling
+        peerConnection.oniceconnectionstatechange = () => {
+          console.log('ICE connection state:', peerConnection.iceConnectionState);
+          if (peerConnection.iceConnectionState === 'failed') {
+            console.log('ICE connection failed, restarting ICE...');
+            peerConnection.restartIce();
+          }
+        };
+
+        // Handle incoming stream with enhanced error handling
         peerConnection.ontrack = (event) => {
+          console.log('Received remote track:', event.track.kind);
           if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = event.streams[0];
             setIsRemoteStreamReady(true);
+            setError(''); // Clear any previous errors
           }
         };
 
-        // Handle connection state changes
-        peerConnection.onconnectionstatechange = () => {
-          if (peerConnection.connectionState === 'disconnected' || 
-              peerConnection.connectionState === 'failed' || 
-              peerConnection.connectionState === 'closed') {
-            setIsRemoteStreamReady(false);
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = null;
-            }
-          }
-        };
+        // Create and send offer with enhanced error handling
+        try {
+          const offer = await peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true
+          });
+          await peerConnection.setLocalDescription(offer);
+          console.log('Sending offer:', offer);
+          socket.emit('offer', {
+            target: partnerId,
+            offer: peerConnection.localDescription
+          });
+        } catch (err) {
+          console.error('Error creating offer:', err);
+          setError('Failed to establish video connection. Please try again.');
+        }
 
-        // Create and send offer
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        socket.emit('offer', {
-          target: partnerId,
-          offer: peerConnection.localDescription
-        });
-
-        // Handle incoming answer
+        // Handle incoming answer with enhanced error handling
         socket.on('answer', async (data: { answer: RTCSessionDescriptionInit, from: string }) => {
           if (data.from === partnerId && peerConnectionRef.current) {
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+            try {
+              console.log('Received answer:', data.answer);
+              await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+            } catch (err) {
+              console.error('Error setting remote description:', err);
+              setError('Failed to establish video connection. Please try again.');
+            }
           }
         });
 
-        // Handle incoming ICE candidates
+        // Handle incoming ICE candidates with enhanced error handling
         socket.on('ice-candidate', async (data: { candidate: RTCIceCandidateInit, from: string }) => {
           if (data.from === partnerId && peerConnectionRef.current) {
             try {
+              console.log('Received ICE candidate:', data.candidate);
               await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
             } catch (e) {
               console.error('Error adding ICE candidate:', e);
+              // Don't set error here as this is not critical
             }
           }
         });
 
-        // Handle incoming offer
+        // Handle incoming offer with enhanced error handling
         socket.on('offer', async (data: { offer: RTCSessionDescriptionInit, from: string }) => {
           if (data.from === partnerId && peerConnectionRef.current) {
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
-            const answer = await peerConnectionRef.current.createAnswer();
-            await peerConnectionRef.current.setLocalDescription(answer);
-            socket.emit('answer', {
-              target: partnerId,
-              answer: peerConnectionRef.current.localDescription
-            });
+            try {
+              console.log('Received offer:', data.offer);
+              await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+              const answer = await peerConnectionRef.current.createAnswer();
+              await peerConnectionRef.current.setLocalDescription(answer);
+              console.log('Sending answer:', answer);
+              socket.emit('answer', {
+                target: partnerId,
+                answer: peerConnectionRef.current.localDescription
+              });
+            } catch (err) {
+              console.error('Error handling offer:', err);
+              setError('Failed to establish video connection. Please try again.');
+            }
           }
         });
 
       } catch (err) {
         console.error('Error accessing media devices:', err);
-        setError('Could not access camera or microphone. Please check your permissions.');
+        setError('Could not access camera or microphone. Please check your permissions and try again.');
       }
     };
 
@@ -157,13 +227,18 @@ const VideoChat: React.FC<VideoChatProps> = ({
     }
 
     return () => {
-      // Cleanup
+      // Enhanced cleanup
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
       }
       if (localVideoRef.current?.srcObject) {
         const stream = localVideoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach(track => track.stop());
+        stream.getTracks().forEach(track => {
+          track.stop();
+          stream.removeTrack(track);
+        });
+        localVideoRef.current.srcObject = null;
       }
       setIsLocalStreamReady(false);
       setIsRemoteStreamReady(false);
