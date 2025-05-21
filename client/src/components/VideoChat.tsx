@@ -33,6 +33,7 @@ const VideoChat: React.FC<VideoChatProps> = ({
   const [isRemoteStreamReady, setIsRemoteStreamReady] = useState(false);
   const isInitiatorRef = useRef(false);
   const pendingCandidatesRef = useRef<RTCIceCandidate[]>([]);
+  const hasStartedNegotiationRef = useRef(false);
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -186,6 +187,50 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         };
 
+        // Handle negotiation needed event
+        peerConnection.onnegotiationneeded = async () => {
+          if (hasStartedNegotiationRef.current) {
+            console.log('[WebRTC] Negotiation needed, but already in progress');
+            return;
+          }
+          hasStartedNegotiationRef.current = true;
+
+          try {
+            // Determine if we should be the initiator based on socket ID
+            const socketId = socket.id;
+            if (!socketId) {
+              console.error('[WebRTC] Socket ID not available');
+              setError('Connection error. Please refresh the page.');
+              return;
+            }
+            const shouldBeInitiator = socketId < partnerId;
+            isInitiatorRef.current = shouldBeInitiator;
+
+            if (shouldBeInitiator) {
+              console.log('[WebRTC] Creating offer as initiator...');
+              const offer = await peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true,
+                iceRestart: true
+              });
+              console.log('[WebRTC] Setting local description...');
+              await peerConnection.setLocalDescription(offer);
+              console.log('[WebRTC] Sending offer to partner:', partnerId);
+              socket.emit('offer', {
+                target: partnerId,
+                offer: peerConnection.localDescription
+              });
+            } else {
+              console.log('[WebRTC] Waiting for offer as responder...');
+            }
+          } catch (err) {
+            console.error('[WebRTC] Error during negotiation:', err);
+            setError('Failed to establish video connection. Please try refreshing the page.');
+          } finally {
+            hasStartedNegotiationRef.current = false;
+          }
+        };
+
         // Handle incoming answer with enhanced error handling
         socket.on('answer', async (data: { answer: RTCSessionDescriptionInit, from: string }) => {
           console.log('[WebRTC] Received answer from:', data.from);
@@ -266,27 +311,6 @@ const VideoChat: React.FC<VideoChatProps> = ({
           }
         });
 
-        // Create and send offer with enhanced error handling
-        try {
-          isInitiatorRef.current = true;
-          console.log('[WebRTC] Creating offer...');
-          const offer = await peerConnection.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: true,
-            iceRestart: true
-          });
-          console.log('[WebRTC] Setting local description...');
-          await peerConnection.setLocalDescription(offer);
-          console.log('[WebRTC] Sending offer to partner:', partnerId);
-          socket.emit('offer', {
-            target: partnerId,
-            offer: peerConnection.localDescription
-          });
-        } catch (err) {
-          console.error('[WebRTC] Error creating/sending offer:', err);
-          setError('Failed to establish video connection. Please try refreshing the page.');
-        }
-
         // Add socket connection status monitoring
         socket.on('connect', () => {
           console.log('[Socket] Connected to signaling server');
@@ -301,6 +325,12 @@ const VideoChat: React.FC<VideoChatProps> = ({
           console.error('[Socket] Connection error:', error);
           setError('Failed to connect to server. Please check your internet connection.');
         });
+
+        // Trigger initial negotiation
+        if (peerConnection.signalingState === 'stable') {
+          const event = new Event('negotiationneeded');
+          peerConnection.dispatchEvent(event);
+        }
 
       } catch (err) {
         console.error('Error accessing media devices:', err);
@@ -328,6 +358,7 @@ const VideoChat: React.FC<VideoChatProps> = ({
       }
       setIsLocalStreamReady(false);
       setIsRemoteStreamReady(false);
+      hasStartedNegotiationRef.current = false;
     };
   }, [partnerId, socket, isPartnerDisconnected]);
 
